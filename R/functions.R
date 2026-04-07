@@ -10,9 +10,6 @@ library(tidyr)
 library(ggplot2)
 library(here)
 
-# ----------------------------
-# 1) CONFIG
-# ----------------------------
 weight_kg <- 78.6
 age <- 39
 height_cm <- 179
@@ -25,27 +22,19 @@ acwr_low <- 0.80
 acwr_high <- 1.30
 acwr_very_high <- 1.50
 
-# ----------------------------
-# 2) FUNCTIONS
-# ----------------------------
 calc_ewma <- function(x, tau) {
   x <- tidyr::replace_na(as.numeric(x), 0)
   n <- length(x)
-
   if (n == 0) return(numeric(0))
-
   out <- numeric(n)
-
   initial_window <- min(7, n)
   out[1] <- mean(x[1:initial_window], na.rm = TRUE)
-
   if (n >= 2) {
     alpha <- 1 / tau
     for (i in 2:n) {
       out[i] <- out[i - 1] + alpha * (x[i] - out[i - 1])
     }
   }
-
   out
 }
 
@@ -117,15 +106,66 @@ make_card <- function(title, value, subtitle = NULL, fill = "#1E88E5") {
     theme_void()
 }
 
-validate_required_columns <- function(df, required_cols) {
-  missing_cols <- setdiff(required_cols, names(df))
-  if (length(missing_cols) > 0) {
-    stop(
-      paste(
-        "Missing required columns in Garmin CSV:",
-        paste(missing_cols, collapse = ", ")
-      ),
-      call. = FALSE
-    )
+find_first_existing <- function(df, candidates, required = FALSE, label = NULL) {
+  nm <- names(df)
+  hits <- candidates[candidates %in% nm]
+  if (length(hits) == 0) {
+    if (required) {
+      stop(
+        paste0(
+          "Could not find required column for ",
+          ifelse(is.null(label), "field", label),
+          ". Checked: ",
+          paste(candidates, collapse = ", ")
+        ),
+        call. = FALSE
+      )
+    }
+    return(NA_character_)
   }
+  hits[1]
+}
+
+parse_garmin_date <- function(x) {
+  x_chr <- as.character(x)
+  parsed <- suppressWarnings(lubridate::ymd(x_chr, quiet = TRUE))
+  if (all(is.na(parsed))) parsed <- suppressWarnings(lubridate::mdy(x_chr, quiet = TRUE))
+  if (all(is.na(parsed))) parsed <- suppressWarnings(lubridate::dmy(x_chr, quiet = TRUE))
+  if (all(is.na(parsed))) parsed <- as.Date(x_chr)
+  as.Date(parsed)
+}
+
+standardize_garmin_columns <- function(df) {
+  df <- janitor::clean_names(df)
+
+  date_col <- find_first_existing(df, c("fecha", "date"), TRUE, "date")
+  activity_col <- find_first_existing(df, c("tipo_de_actividad", "activity_type", "activity_type_name"), TRUE, "activity type")
+  distance_col <- find_first_existing(df, c("distancia", "distance"), TRUE, "distance")
+  calories_col <- find_first_existing(df, c("calorias", "calories"), TRUE, "calories")
+
+  moving_time_col <- find_first_existing(df, c("tiempo_en_movimiento", "moving_time"), FALSE, "moving time")
+  elapsed_time_col <- find_first_existing(df, c("tiempo_transcurrido", "elapsed_time"), FALSE, "elapsed time")
+  time_col <- find_first_existing(df, c("tiempo", "time"), FALSE, "time")
+  hr_col <- find_first_existing(df, c("frecuencia_cardiaca_media", "average_heart_rate"), FALSE, "average heart rate")
+  tss_col <- find_first_existing(df, c("training_stress_score_r", "training_stress_score"), FALSE, "training stress score")
+
+  df %>%
+    mutate(
+      fecha = parse_garmin_date(.data[[date_col]]),
+      activity_type = str_to_lower(as.character(.data[[activity_col]])),
+      distance_raw = suppressWarnings(as.numeric(.data[[distance_col]])),
+      calories_raw = suppressWarnings(as.numeric(.data[[calories_col]])),
+      avg_hr_raw = if (!is.na(hr_col)) suppressWarnings(as.numeric(.data[[hr_col]])) else NA_real_,
+      tss_raw = if (!is.na(tss_col)) suppressWarnings(as.numeric(.data[[tss_col]])) else NA_real_,
+      moving_time_min = case_when(
+        !is.na(moving_time_col) ~ hms_to_min(.data[[moving_time_col]]),
+        !is.na(elapsed_time_col) ~ hms_to_min(.data[[elapsed_time_col]]),
+        !is.na(time_col) ~ hms_to_min(.data[[time_col]]),
+        TRUE ~ NA_real_
+      )
+    )
+}
+
+is_running_activity <- function(x) {
+  str_detect(str_to_lower(as.character(x)), "carrera|running|run|corrida|treadmill|cinta")
 }
